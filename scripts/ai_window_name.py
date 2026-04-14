@@ -36,6 +36,15 @@ DEFAULT_CLAUDE_MODEL = 'haiku'
 DEFAULT_CACHE_TTL = 300
 DEFAULT_MAX_TOKENS = 30
 
+# Apps that get prefixed to the title when detected running in a pane.
+# Format: {pane_current_command: display_prefix}
+DEFAULT_PREFIX_APPS = {
+    'nvim': 'nvim',
+    'vim': 'vim',
+}
+
+SHELLS = {'bash', 'fish', 'sh', 'zsh'}
+
 DEFAULT_SYSTEM_PROMPT = (
     'You are naming a tmux window based on its terminal content. '
     'Your goal: figure out WHAT the user is working on and produce a '
@@ -65,6 +74,62 @@ def get_option(name, default=''):
         return out if out else default
     except subprocess.CalledProcessError:
         return default
+
+
+def get_prefix_apps():
+    """Load prefix apps from tmux option or use defaults.
+
+    User can set: set -g @ai_window_name_prefix_apps 'nvim:nvim,vim:vim,docker:docker'
+    Format: command:prefix pairs, comma-separated.
+    """
+    raw = get_option('prefix_apps', '')
+    if not raw:
+        return dict(DEFAULT_PREFIX_APPS)
+
+    apps = {}
+    for pair in raw.split(','):
+        pair = pair.strip()
+        if ':' in pair:
+            cmd, prefix = pair.split(':', 1)
+            apps[cmd.strip()] = prefix.strip()
+        elif pair:
+            apps[pair] = pair  # command is its own prefix
+    return apps
+
+
+def detect_prefix(pane_meta, prefix_apps):
+    """Check if any pane is running a prefix-worthy app. Returns prefix or ''."""
+    for line in pane_meta.split('\n'):
+        fields = line.split('\t')
+        command = fields[1] if len(fields) > 1 else ''
+        if command in prefix_apps:
+            return prefix_apps[command]
+    return ''
+
+
+def try_plain_shell_title(pane_meta):
+    """If all panes are plain shells, return a title from the directory path.
+
+    Returns a title string, or None if any pane is running a non-shell program.
+    """
+    paths = []
+    for line in pane_meta.split('\n'):
+        fields = line.split('\t')
+        command = fields[1] if len(fields) > 1 else ''
+        path = fields[2] if len(fields) > 2 else ''
+        if command not in SHELLS:
+            return None
+        paths.append(path)
+
+    if not paths:
+        return None
+
+    # Use the first pane's path as the title basis
+    home = os.path.expanduser('~')
+    path = paths[0]
+    if path == home:
+        return '~'
+    return os.path.basename(path) or '~'
 
 
 # ── Pane capture ─────────────────────────────────────────────────────
@@ -194,10 +259,25 @@ def generate_title(content, mode, system_prompt):
 
 # ── Main ─────────────────────────────────────────────────────────────
 
+def apply_prefix(title, pane_meta, prefix_apps):
+    """Prefix title with detected app name (e.g. 'nvim:billing-cleanup')."""
+    prefix = detect_prefix(pane_meta, prefix_apps)
+    if prefix:
+        # Strip prefix if the LLM already included it
+        for sep in (':', '-'):
+            tag = f'{prefix}{sep}'
+            if title.startswith(tag):
+                title = title[len(tag):]
+                break
+        return f'{prefix}:{title}'
+    return title
+
+
 def main():
     mode = get_option('mode', 'local')
     ttl = int(get_option('cache_ttl', str(DEFAULT_CACHE_TTL)))
     system_prompt = get_option('system_prompt', DEFAULT_SYSTEM_PROMPT)
+    prefix_apps = get_prefix_apps()
 
     window_id = subprocess.check_output([
         'tmux', 'display-message', '-p', '#{window_id}'
@@ -218,13 +298,19 @@ def main():
             subprocess.run(['tmux', 'rename-window', '-t', window_id, title])
             return
 
-    # Cache miss or expired
-    content = capture_window_content(window_id, pane_meta)
-    try:
-        title = generate_title(content, mode, system_prompt)
-    except Exception as e:
-        print(f'tmux-ai-window-name: {e}', file=sys.stderr)
-        return
+    # Cache miss or expired — check if we can skip the LLM entirely
+    plain_title = try_plain_shell_title(pane_meta)
+    if plain_title is not None:
+        title = plain_title
+    else:
+        content = capture_window_content(window_id, pane_meta)
+        try:
+            title = generate_title(content, mode, system_prompt)
+        except Exception as e:
+            print(f'tmux-ai-window-name: {e}', file=sys.stderr)
+            return
+
+        title = apply_prefix(title, pane_meta, prefix_apps)
 
     cache[window_id] = {'hash': h, 'title': title, 'time': now}
     save_cache(cache)
