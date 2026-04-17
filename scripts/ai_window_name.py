@@ -11,7 +11,8 @@ Backends (set via @ai_window_name_mode in tmux.conf):
 Caching strategy:
   - Hash is based on pane METADATA (command + path + git branch),
     not full content. Terminal redraws/resizes don't trigger re-queries.
-  - A TTL ensures we re-query periodically even if metadata is unchanged.
+  - Metadata change is the only invalidation signal; unchanged metadata
+    means the cached title stays valid.
 """
 
 import subprocess
@@ -20,7 +21,6 @@ import json
 import os
 import sys
 import tempfile
-import time
 import urllib.request
 import urllib.error
 
@@ -33,7 +33,6 @@ MAX_LINES_PER_PANE = 40
 DEFAULT_LOCAL_URL = 'http://localhost:8080/v1/chat/completions'
 DEFAULT_LOCAL_MODEL = 'default'
 DEFAULT_CLAUDE_MODEL = 'haiku'
-DEFAULT_CACHE_TTL = 300
 DEFAULT_MAX_TOKENS = 30
 
 # Apps that get prefixed to the title when detected running in a pane.
@@ -275,7 +274,6 @@ def apply_prefix(title, pane_meta, prefix_apps):
 
 def main():
     mode = get_option('mode', 'local')
-    ttl = int(get_option('cache_ttl', str(DEFAULT_CACHE_TTL)))
     system_prompt = get_option('system_prompt', DEFAULT_SYSTEM_PROMPT)
     prefix_apps = get_prefix_apps()
 
@@ -285,20 +283,17 @@ def main():
 
     pane_meta = get_pane_metadata(window_id)
     h = metadata_hash(pane_meta)
-    now = time.time()
 
-    # Check cache
+    # Check cache — hash match means metadata is unchanged, so title is still valid.
     cache = load_cache()
     cached = cache.get(window_id)
     if cached and cached.get('hash') == h:
-        age = now - cached.get('time', 0)
-        if age < ttl:
-            title = cached['title']
-            subprocess.run(['tmux', 'set-window-option', '-t', window_id, 'automatic-rename', 'off'])
-            subprocess.run(['tmux', 'rename-window', '-t', window_id, title])
-            return
+        title = cached['title']
+        subprocess.run(['tmux', 'set-window-option', '-t', window_id, 'automatic-rename', 'off'])
+        subprocess.run(['tmux', 'rename-window', '-t', window_id, title])
+        return
 
-    # Cache miss or expired — check if we can skip the LLM entirely
+    # Cache miss — check if we can skip the LLM entirely
     plain_title = try_plain_shell_title(pane_meta)
     if plain_title is not None:
         title = plain_title
@@ -312,7 +307,7 @@ def main():
 
         title = apply_prefix(title, pane_meta, prefix_apps)
 
-    cache[window_id] = {'hash': h, 'title': title, 'time': now}
+    cache[window_id] = {'hash': h, 'title': title}
     save_cache(cache)
 
     subprocess.run(['tmux', 'set-window-option', '-t', window_id, 'automatic-rename', 'off'])

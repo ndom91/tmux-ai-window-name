@@ -65,9 +65,6 @@ set -g @ai_window_name_claude_model 'haiku'
 ### Shared options
 
 ```tmux
-# Cache TTL in seconds — how long before re-querying the same window (default: 300)
-set -g @ai_window_name_cache_ttl '600'
-
 # Max tokens for LLM response (default: 30)
 set -g @ai_window_name_max_tokens '30'
 
@@ -91,7 +88,7 @@ set -g @ai_window_name_max_name_len '20'
 
 1. On every window switch (`after-select-window`), the script runs in the background
 2. It hashes pane **metadata** (running command + directory + git branch) — not terminal content
-3. If the hash matches the cache and the TTL hasn't expired, it applies the cached title instantly (<100ms)
+3. If the hash matches the cached entry for that window, it applies the cached title instantly (<100ms)
 4. On a cache miss, it captures the last 40 lines of each pane and queries the LLM
 5. The LLM response is cached and the window is renamed
 
