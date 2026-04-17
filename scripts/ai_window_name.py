@@ -23,9 +23,13 @@ import sys
 import tempfile
 import urllib.request
 import urllib.error
+import fcntl
+from contextlib import contextmanager
 
 OPTIONS_PREFIX = '@ai_window_name_'
 CACHE_FILE = os.path.join(tempfile.gettempdir(), 'tmux-ai-window-names.json')
+LOCK_FILE = os.path.join(tempfile.gettempdir(), 'tmux-ai-window-names.lock')
+DEBUG_LOG = os.path.join(tempfile.gettempdir(), 'tmux-ai-window-names.log')
 MAX_LINES_PER_PANE = 40
 
 # ── Defaults (overridable via tmux options) ──────────────────────────
@@ -40,6 +44,8 @@ DEFAULT_MAX_TOKENS = 30
 DEFAULT_PREFIX_APPS = {
     'nvim': 'nvim',
     'vim': 'vim',
+    'claude': 'claude',
+    'opencode': 'opencode',
 }
 
 SHELLS = {'bash', 'fish', 'sh', 'zsh'}
@@ -97,12 +103,60 @@ def get_prefix_apps():
 
 
 def detect_prefix(pane_meta, prefix_apps):
-    """Check if any pane is running a prefix-worthy app. Returns prefix or ''."""
+    """Check if any pane (or its descendants) is running a prefix-worthy app.
+
+    Some tools (claude, opencode) install as a wrapper that exec's into a
+    versioned sub-binary at ~/.local/share/<app>/<version>/<bin>. When that
+    happens, tmux's pane_current_command shows the version (e.g. "2.1.112")
+    rather than the friendly name. To stay robust across upgrades, we fall
+    back to scanning the pane's process descendants for a known name.
+    """
+    pane_pids = []
     for line in pane_meta.split('\n'):
         fields = line.split('\t')
         command = fields[1] if len(fields) > 1 else ''
         if command in prefix_apps:
             return prefix_apps[command]
+        if len(fields) > 3:
+            try:
+                pane_pids.append(int(fields[3]))
+            except ValueError:
+                pass
+
+    if not pane_pids:
+        return ''
+
+    # Build a parent->children map of all processes once, then DFS each pane.
+    try:
+        out = subprocess.check_output(
+            ['ps', '-A', '-o', 'pid=,ppid=,comm='],
+            stderr=subprocess.DEVNULL,
+        ).decode()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return ''
+
+    children = {}
+    comms = {}
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        # comm may include a path (BSD ps does this for some procs); take basename
+        comms[pid] = parts[2].rsplit('/', 1)[-1]
+        children.setdefault(ppid, []).append(pid)
+
+    for root in pane_pids:
+        stack = list(children.get(root, []))
+        while stack:
+            pid = stack.pop()
+            comm = comms.get(pid, '')
+            if comm in prefix_apps:
+                return prefix_apps[comm]
+            stack.extend(children.get(pid, []))
     return ''
 
 
@@ -136,7 +190,7 @@ def try_plain_shell_title(pane_meta):
 def get_pane_metadata(window_id):
     return subprocess.check_output([
         'tmux', 'list-panes', '-t', window_id,
-        '-F', '#{pane_id}\t#{pane_current_command}\t#{pane_current_path}'
+        '-F', '#{pane_id}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_pid}'
     ]).decode().strip()
 
 
@@ -187,6 +241,16 @@ def metadata_hash(pane_meta):
 
 # ── Cache ────────────────────────────────────────────────────────────
 
+@contextmanager
+def cache_lock():
+    """Exclusive lock across all script invocations — closes a read-modify-write
+    race where rapid window switches spawn overlapping scripts that clobber
+    each other's cache entries, causing re-queries on the next visit."""
+    with open(LOCK_FILE, 'w') as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        yield
+
+
 def load_cache():
     try:
         with open(CACHE_FILE) as f:
@@ -198,6 +262,17 @@ def load_cache():
 def save_cache(cache):
     with open(CACHE_FILE, 'w') as f:
         json.dump(cache, f)
+
+
+def debug_log(msg):
+    """Append a line to the debug log if @ai_window_name_debug is set."""
+    if get_option('debug', '') not in ('1', 'true', 'yes', 'on'):
+        return
+    try:
+        with open(DEBUG_LOG, 'a') as f:
+            f.write(msg + '\n')
+    except OSError:
+        pass
 
 
 # ── LLM backends ────────────────────────────────────────────────────
@@ -277,23 +352,41 @@ def main():
     system_prompt = get_option('system_prompt', DEFAULT_SYSTEM_PROMPT)
     prefix_apps = get_prefix_apps()
 
-    window_id = subprocess.check_output([
-        'tmux', 'display-message', '-p', '#{window_id}'
-    ]).decode().strip()
+    # Prefer window_id passed in by the hook; fall back to "current window" for
+    # manual invocations. The hook-supplied value avoids a race where the user
+    # switches windows between hook-fire and this script running in the background.
+    args = [a for a in sys.argv[1:] if a]
+    force = '--force' in args
+    args = [a for a in args if a != '--force']
+    if args and args[0].startswith('@'):
+        window_id = args[0]
+    else:
+        window_id = subprocess.check_output([
+            'tmux', 'display-message', '-p', '#{window_id}'
+        ]).decode().strip()
 
     pane_meta = get_pane_metadata(window_id)
     h = metadata_hash(pane_meta)
 
-    # Check cache — hash match means metadata is unchanged, so title is still valid.
-    cache = load_cache()
-    cached = cache.get(window_id)
-    if cached and cached.get('hash') == h:
-        title = cached['title']
-        subprocess.run(['tmux', 'set-window-option', '-t', window_id, 'automatic-rename', 'off'])
-        subprocess.run(['tmux', 'rename-window', '-t', window_id, title])
-        return
+    # Phase 1: quick cache check under the lock. If we hit, rename and exit
+    # without doing any LLM work. --force skips the cache read entirely.
+    with cache_lock():
+        cache = load_cache()
+        cached = cache.get(window_id)
+        if not force and cached and cached.get('hash') == h:
+            title = cached['title']
+            debug_log(f'[{os.getpid()}] {window_id} HIT  hash={h} title={title!r}')
+            subprocess.run(['tmux', 'set-window-option', '-t', window_id, 'automatic-rename', 'off'])
+            subprocess.run(['tmux', 'rename-window', '-t', window_id, title])
+            return
+        prev_hash = cached.get('hash') if cached else None
+        debug_log(
+            f'[{os.getpid()}] {window_id} MISS hash={h} prev={prev_hash} '
+            f'force={force} meta={pane_meta!r}'
+        )
 
-    # Cache miss — check if we can skip the LLM entirely
+    # Phase 2: heavy work outside the lock so concurrent scripts for OTHER
+    # windows don't block waiting for our LLM call to finish.
     plain_title = try_plain_shell_title(pane_meta)
     if plain_title is not None:
         title = plain_title
@@ -307,8 +400,12 @@ def main():
 
         title = apply_prefix(title, pane_meta, prefix_apps)
 
-    cache[window_id] = {'hash': h, 'title': title}
-    save_cache(cache)
+    # Phase 3: atomic update — re-read the cache under the lock so any entries
+    # written by concurrent scripts (for other windows) aren't clobbered.
+    with cache_lock():
+        cache = load_cache()
+        cache[window_id] = {'hash': h, 'title': title}
+        save_cache(cache)
 
     subprocess.run(['tmux', 'set-window-option', '-t', window_id, 'automatic-rename', 'off'])
     subprocess.run(['tmux', 'rename-window', '-t', window_id, title])
