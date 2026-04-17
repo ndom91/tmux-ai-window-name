@@ -2,7 +2,7 @@
 
 Automatically rename tmux windows using an LLM. The plugin captures the visible content of all panes in a window, sends it to an LLM, and sets a concise kebab-case title describing what you're working on.
 
-It prioritizes git branch names (from shell prompts and neovim statuslines) to generate context-aware titles like `billing-flag-cleanup` or `ms-teams-channels`. Detected apps (`nvim`, `claude`, `opencode`, …) are prefixed automatically: `nvim:billing-flag-cleanup`, `claude:rate-limit-fix`.
+It prioritizes git branch names (from shell prompts and neovim statuslines) to generate context-aware titles like `billing-flag-cleanup` or `ms-teams-channels`. Detected apps (`nvim`, `claude`, `opencode`, …) are prefixed automatically: `nvim:billing-flag-cleanup`, `claude:rate-limit-fix`. Remote shells are named after the destination, e.g. `ssh:llama-server.puff.lan` — no LLM call needed.
 
 Fork of [ofirgall/tmux-window-name](https://github.com/ofirgall/tmux-window-name) with LLM-powered naming and a classic fallback mode.
 
@@ -71,9 +71,11 @@ set -g @ai_window_name_max_tokens '30'
 # Custom system prompt (overrides the built-in prompt)
 set -g @ai_window_name_system_prompt 'Generate a 2-word kebab-case title for this terminal.'
 
-# Apps to prefix on the title when detected in a pane (default: 'nvim:nvim,vim:vim,claude:claude,opencode:opencode')
+# Apps to prefix on the title when detected in a pane (default: 'nvim:nvim,vim:vim,claude:claude,opencode:opencode,ssh:ssh')
 # Format: comma-separated 'command:prefix' pairs. Bare 'foo' is shorthand for 'foo:foo'.
-set -g @ai_window_name_prefix_apps 'nvim,vim,claude,opencode,docker:docker'
+# ssh gets special treatment: the pane's ssh argv is parsed and the title becomes 'ssh:<hostname>'
+# (no LLM call). Remove 'ssh' from the list to disable.
+set -g @ai_window_name_prefix_apps 'nvim,vim,claude,opencode,ssh,docker:docker'
 
 # Key (under prefix) to force-refresh the current window's title (default: 'R')
 set -g @ai_window_name_refresh_key 'R'
@@ -107,8 +109,9 @@ Override the key with `@ai_window_name_refresh_key`.
 1. On every window switch (`after-select-window`) and session change (`client-session-changed`), the script runs in the background. The hook passes the target `#{window_id}` directly so rapid switches don't cause the script to operate on the wrong window.
 2. The script hashes pane **metadata** — `pane_current_command + pane_current_path + git branch` for each pane — not terminal content.
 3. **Cache hit** (hash matches the cached entry for that window): apply the cached title instantly. No LLM call.
-4. **Cache miss** — three sub-paths in order:
+4. **Cache miss** — four sub-paths in order:
    - **Plain-shell fast path**: if every pane is just a shell (`bash`, `zsh`, `fish`, `sh`), use the directory basename as the title. No LLM call.
+   - **ssh fast path**: if any pane's foreground is `ssh`, walk the pane's process tree to find the actual ssh process, parse its argv (handling flags like `-p`, `-i`, `-o` and `user@host` syntax), and use `ssh:<hostname>` as the title. No LLM call.
    - **Prefix detection**: scan each pane's `pane_current_command`. If it matches a known prefix app, remember it. If not, walk the pane's process tree and look for a known name there too — this handles wrapper binaries (e.g. `claude` exec'ing into `~/.local/share/claude/2.1.112/claude` where tmux reports the version as the command).
    - **LLM call**: capture the last 40 lines of each pane and ask the LLM for a title. Apply the prefix if detected.
 5. The result is written back to the cache, atomically, under a file lock to prevent concurrent script invocations from clobbering each other.
