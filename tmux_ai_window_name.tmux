@@ -35,6 +35,12 @@ fi
 tmux set -g automatic-rename on
 tmux set-hook -g 'after-new-window[8921]' 'set -w automatic-rename off'
 
-# Run the LLM rename script on window switch and session switch (background, non-blocking)
-tmux set-hook -g 'after-select-window[8921]' "run-shell -b '$CURRENT_DIR/scripts/ai_window_name.py'"
-tmux set-hook -g 'client-session-changed[8921]' "run-shell -b '$CURRENT_DIR/scripts/ai_window_name.py'"
+# Run the LLM rename script on window switch and session switch (background, non-blocking).
+# Pass #{window_id} explicitly so rapid switches don't cause the script to rename
+# the wrong window (the "current" window can change between hook-fire and script run).
+tmux set-hook -g 'after-select-window[8921]' "run-shell -b '$CURRENT_DIR/scripts/ai_window_name.py #{window_id}'"
+tmux set-hook -g 'client-session-changed[8921]' "run-shell -b '$CURRENT_DIR/scripts/ai_window_name.py #{window_id}'"
+
+# prefix+R: force a fresh LLM query for the current window (bypasses cache).
+refresh_key=$(tmux show-option -gv @ai_window_name_refresh_key 2>/dev/null || echo "R")
+tmux bind-key "$refresh_key" run-shell -b "$CURRENT_DIR/scripts/ai_window_name.py --force #{window_id}"
