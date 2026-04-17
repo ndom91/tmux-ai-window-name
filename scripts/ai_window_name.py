@@ -46,6 +46,14 @@ DEFAULT_PREFIX_APPS = {
     'vim': 'vim',
     'claude': 'claude',
     'opencode': 'opencode',
+    'ssh': 'ssh',
+}
+
+# ssh option flags that take a separate argument — used when parsing the
+# remote destination out of a full `ssh …` command line.
+SSH_ARG_FLAGS = {
+    '-b', '-B', '-c', '-D', '-E', '-e', '-F', '-I', '-i', '-J', '-L',
+    '-l', '-m', '-O', '-o', '-p', '-Q', '-R', '-S', '-W', '-w',
 }
 
 SHELLS = {'bash', 'fish', 'sh', 'zsh'}
@@ -183,6 +191,91 @@ def try_plain_shell_title(pane_meta):
     if path == home:
         return '~'
     return os.path.basename(path) or '~'
+
+
+def parse_ssh_host(args):
+    """Extract the remote destination from an `ssh …` command line.
+
+    Skips flag options (with or without their argument) and returns the
+    first positional token, stripped of any `user@` prefix. Returns ''
+    if no destination is present (e.g. bare `ssh` with no args).
+    """
+    parts = args.split()
+    i = 1  # skip the ssh binary itself
+    while i < len(parts):
+        tok = parts[i]
+        if tok in SSH_ARG_FLAGS:
+            i += 2
+            continue
+        if tok.startswith('-'):
+            i += 1
+            continue
+        return tok.split('@', 1)[-1]
+    return ''
+
+
+def find_ssh_host(pane_pid):
+    """Find an ssh process descended from pane_pid and parse its hostname.
+
+    pane_current_command reports 'ssh' but pane_pid is the parent shell;
+    the ssh process itself is a descendant, so we walk the process tree
+    to get its argv.
+    """
+    try:
+        out = subprocess.check_output(
+            ['ps', '-A', '-o', 'pid=,ppid=,comm=,args='],
+            stderr=subprocess.DEVNULL,
+        ).decode()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return ''
+
+    children = {}
+    procs = {}
+    for line in out.splitlines():
+        fields = line.split(None, 3)
+        if len(fields) < 4:
+            continue
+        try:
+            pid, ppid = int(fields[0]), int(fields[1])
+        except ValueError:
+            continue
+        comm = fields[2].rsplit('/', 1)[-1]
+        procs[pid] = (comm, fields[3])
+        children.setdefault(ppid, []).append(pid)
+
+    stack = list(children.get(pane_pid, []))
+    while stack:
+        pid = stack.pop()
+        comm, args = procs.get(pid, ('', ''))
+        if comm == 'ssh':
+            return parse_ssh_host(args)
+        stack.extend(children.get(pid, []))
+    return ''
+
+
+def try_ssh_title(pane_meta, prefix_apps):
+    """If any pane is running ssh, return 'ssh:hostname' as the full title.
+
+    ssh sessions get deterministic, hostname-based names — the LLM has
+    nothing useful to add and would just invent something. Falls back to
+    bare 'ssh' if the destination can't be parsed.
+    """
+    if 'ssh' not in prefix_apps:
+        return None
+
+    for line in pane_meta.split('\n'):
+        fields = line.split('\t')
+        command = fields[1] if len(fields) > 1 else ''
+        if command != 'ssh' or len(fields) <= 3:
+            continue
+        try:
+            pane_pid = int(fields[3])
+        except ValueError:
+            continue
+        prefix = prefix_apps['ssh']
+        host = find_ssh_host(pane_pid)
+        return f'{prefix}:{host}' if host else prefix
+    return None
 
 
 # ── Pane capture ─────────────────────────────────────────────────────
@@ -388,8 +481,11 @@ def main():
     # Phase 2: heavy work outside the lock so concurrent scripts for OTHER
     # windows don't block waiting for our LLM call to finish.
     plain_title = try_plain_shell_title(pane_meta)
+    ssh_title = try_ssh_title(pane_meta, prefix_apps)
     if plain_title is not None:
         title = plain_title
+    elif ssh_title is not None:
+        title = ssh_title
     else:
         content = capture_window_content(window_id, pane_meta)
         try:
