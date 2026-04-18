@@ -53,6 +53,12 @@ set -g @ai_window_name_local_model 'gemma-4-26B-A4B-it'
 
 # API key — sent as Bearer token in Authorization header (default: none)
 set -g @ai_window_name_local_api_key 'sk-...'
+
+# SSL certificate verification (default: 'true')
+#   'true'            — normal SSL verification (system CA bundle)
+#   'false'           — disable verification entirely (self-signed certs)
+#   '/path/to/ca.pem' — path to a custom CA bundle file
+set -g @ai_window_name_local_ssl_verify 'true'
 ```
 
 ### Claude mode options

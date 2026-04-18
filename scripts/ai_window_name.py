@@ -21,6 +21,7 @@ import json
 import os
 import sys
 import tempfile
+import ssl
 import urllib.request
 import urllib.error
 import fcntl
@@ -389,8 +390,17 @@ def generate_title_local(content, system_prompt):
     api_key = get_option('local_api_key', '')
     if api_key:
         headers['Authorization'] = f'Bearer {api_key}'
+    ssl_verify = get_option('local_ssl_verify', 'true')
+    ssl_ctx = None
+    if ssl_verify.lower() in ('0', 'false', 'no', 'off'):
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+    elif ssl_verify.lower() not in ('1', 'true', 'yes', 'on', ''):
+        ssl_ctx = ssl.create_default_context(cafile=ssl_verify)
+
     req = urllib.request.Request(url, data=payload, headers=headers)
-    with urllib.request.urlopen(req, timeout=15) as resp:
+    with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as resp:
         data = json.loads(resp.read())
 
     return data['choices'][0]['message']['content'].strip().strip('`"\' ')

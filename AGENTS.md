@@ -39,6 +39,7 @@ The LLM modes generate kebab-case titles (e.g. `billing-flag-cleanup`) derived m
   2. ssh fast path (`try_ssh_title`) — any pane running `ssh` → `ssh:<hostname>` parsed from argv.
   3. LLM call → `apply_prefix` wraps with any detected prefix app (nvim, claude, etc.).
 - **Prefix detection walks the process tree.** Wrappers like `claude` exec into a versioned sub-binary, so `pane_current_command` reports the version string. `detect_prefix` falls back to scanning `ps -A` descendants of `pane_pid` for a known comm name.
+- **SSL verification is configurable.** `@ai_window_name_local_ssl_verify` accepts `true` (default, system CA bundle), `false` (skip verification), or a file path to a custom CA PEM bundle. The SSL context is built per-request in `generate_title_local`.
 - **User options** live under the `@ai_window_name_` prefix in tmux. `get_option()` in `ai_window_name.py` reads them lazily.
 
 ## Key concepts in `rename_session_windows.py` (plugin mode)
@@ -58,9 +59,9 @@ Tests currently cover `rename_session_windows.py` (plugin mode). `ai_window_name
 
 ## Ground rules when making changes
 
-### ALWAYS update the README when adding or changing user-visible behavior
+### ALWAYS update docs (README + AGENTS.md) when adding or changing behavior
 
-The README is the only thing users read. If you:
+The README is the only thing users read. AGENTS.md is the only thing AI agents read. Both must stay in sync with the code. If you:
 
 - add a new `@ai_window_name_*` option → document it under the right section
 - change a default value → update the `(default: …)` note in both the README and the code comment
@@ -68,8 +69,9 @@ The README is the only thing users read. If you:
 - add a new keybinding → add it to the Keybindings table
 - add a new prefix app to `DEFAULT_PREFIX_APPS` → update the example default in the `@ai_window_name_prefix_apps` section
 - add a new dependency → note it under "Dependencies"
+- change internal behavior (caching, SSL, process detection, etc.) → update the "Key concepts" section in AGENTS.md
 
-No exceptions. A feature that isn't in the README effectively doesn't exist — users won't discover it, and future contributors will assume it's internal and rip it out.
+No exceptions. A feature that isn't in the README effectively doesn't exist — users won't discover it, and future contributors will assume it's internal and rip it out. Likewise, internal behavior not described in AGENTS.md will be misunderstood or broken by AI agents.
 
 ### Other conventions
 
