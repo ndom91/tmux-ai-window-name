@@ -50,6 +50,9 @@ set -g @ai_window_name_local_url 'http://my-server:8080/v1/chat/completions'
 
 # Model name sent in the request (default: 'default')
 set -g @ai_window_name_local_model 'gemma-4-26B-A4B-it'
+
+# API key — sent as Bearer token in Authorization header (default: none)
+set -g @ai_window_name_local_api_key 'sk-...'
 ```
 
 ### Claude mode options

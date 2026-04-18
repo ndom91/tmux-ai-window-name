@@ -385,7 +385,11 @@ def generate_title_local(content, system_prompt):
         'max_tokens': max_tokens,
     }).encode()
 
-    req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
+    headers = {'Content-Type': 'application/json'}
+    api_key = get_option('local_api_key', '')
+    if api_key:
+        headers['Authorization'] = f'Bearer {api_key}'
+    req = urllib.request.Request(url, data=payload, headers=headers)
     with urllib.request.urlopen(req, timeout=15) as resp:
         data = json.loads(resp.read())
 
